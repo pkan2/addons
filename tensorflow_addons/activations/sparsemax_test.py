@@ -252,34 +252,40 @@ class SparsemaxTest(tf.test.TestCase):
                         % (p[val, j] - p[val, i], z[val, j] - z[val, i] + etol),
                     )
 
-    def test_two_dimentional(self, dtype=None):
-        """check two dimentation sparsemax case."""
-        t = np.linspace(-2, 2, test_obs, dtype=dtype)
-        z = np.vstack([t, np.zeros(test_obs, dtype=dtype)]).T
 
-        tf_sparsemax_op, tf_sparsemax_out = self._tf_sparsemax(z, dtype)
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_two_dimentional(dtype):
+    """check two dimentation sparsemax case."""
+    t = np.linspace(-2, 2, test_obs, dtype=dtype)
+    z = np.vstack([t, np.zeros(test_obs, dtype=dtype)]).T
 
-        p0_expected = np.select([t < -1, t <= 1, t > 1], [0, (t + 1) / 2, 1])
+    tf_sparsemax_out = sparsemax(z.astype(dtype)).numpy()
 
-        self.assertAllCloseAccordingToType(p0_expected, tf_sparsemax_out[:, 0])
-        self.assertAllCloseAccordingToType(1 - p0_expected, tf_sparsemax_out[:, 1])
-        self.assertShapeEqual(z, tf_sparsemax_op)
+    p0_expected = np.select([t < -1, t <= 1, t > 1], [0, (t + 1) / 2, 1])
 
-    def test_gradient_against_estimate(self, dtype=None):
-        """check sparsemax Rop, against estimated Rop."""
-        random = np.random.RandomState(9)
+    test_utils.assert_allclose_according_to_type(p0_expected, tf_sparsemax_out[:, 0])
+    test_utils.assert_allclose_according_to_type(
+        1 - p0_expected, tf_sparsemax_out[:, 1]
+    )
+    assert z.shape == tf_sparsemax_out.shape
 
-        # sparsemax is not a smooth function so gradient estimation is only
-        # possible for float64.
-        if dtype != "float64":
-            return
 
-        z = random.uniform(low=-1, high=1, size=(test_obs, 10)).astype(dtype)
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_gradient_against_estimate(dtype):
+    """check sparsemax Rop, against estimated Rop."""
+    random = np.random.RandomState(9)
 
-        (jacob_sym,), (jacob_num,) = tf.test.compute_gradient(
-            lambda logits: sparsemax(logits), [z], delta=1e-6
-        )
-        self.assertAllCloseAccordingToType(jacob_sym, jacob_num)
+    # sparsemax is not a smooth function so gradient estimation is only
+    # possible for float64.
+    if dtype != "float64":
+        return
+
+    z = random.uniform(low=-1, high=1, size=(test_obs, 10)).astype(dtype)
+
+    (jacob_sym,), (jacob_num,) = tf.test.compute_gradient(
+        lambda logits: sparsemax(logits), [z], delta=1e-6
+    )
+    np.testing.assert_allclose(jacob_sym, jacob_num)
 
 
 if __name__ == "__main__":
