@@ -26,22 +26,24 @@ from tensorflow_addons.layers import wrappers
 from tensorflow_addons.utils import test_utils
 
 
+def test_basic():
+    test_utils.layer_test(
+        wrappers.WeightNormalization,
+        kwargs={"layer": tf.keras.layers.Conv2D(5, (2, 2)),},
+        input_shape=(2, 4, 4, 3),
+    )
+
+
+def test_no_bias():
+    test_utils.layer_test(
+        wrappers.WeightNormalization,
+        kwargs={"layer": tf.keras.layers.Dense(5, use_bias=False),},
+        input_shape=(2, 4),
+    )
+
+
 @test_utils.run_all_in_graph_and_eager_modes
 class WeightNormalizationTest(tf.test.TestCase, parameterized.TestCase):
-    def test_basic(self):
-        test_utils.layer_test(
-            wrappers.WeightNormalization,
-            kwargs={"layer": tf.keras.layers.Conv2D(5, (2, 2)),},
-            input_shape=(2, 4, 4, 3),
-        )
-
-    def test_no_bias(self):
-        test_utils.layer_test(
-            wrappers.WeightNormalization,
-            kwargs={"layer": tf.keras.layers.Dense(5, use_bias=False),},
-            input_shape=(2, 4),
-        )
-
     def _check_data_init(self, data_init, input_data, expected_output):
         layer = tf.keras.layers.Dense(
             input_data.shape[-1],
@@ -150,32 +152,28 @@ class WeightNormalizationTest(tf.test.TestCase, parameterized.TestCase):
         self.evaluate(tf.compat.v1.global_variables_initializer())
         self.assertAllClose(self.evaluate(base_output), self.evaluate(wn_output))
 
-    @parameterized.named_parameters(
-        ["Dense", lambda: tf.keras.layers.Dense(1), [1]],
-        ["SimpleRNN", lambda: tf.keras.layers.SimpleRNN(1), [10, 10]],
-        ["Conv2D", lambda: tf.keras.layers.Conv2D(3, 1), [3, 3, 1]],
-        ["LSTM", lambda: tf.keras.layers.LSTM(1), [10, 10]],
-    )
-    def test_removal(self, base_layer_fn, input_shape):
-        sample_data = np.ones([1] + input_shape, dtype=np.float32)
 
-        for data_init in [True, False]:
-            with self.subTest(data_init=data_init):
-                base_layer = base_layer_fn()
-                wn_layer = wrappers.WeightNormalization(base_layer, data_init)
-                wn_output = wn_layer(sample_data)
-                self.evaluate(tf.compat.v1.global_variables_initializer())
-                with tf.control_dependencies([wn_output]):
-                    wn_removed_layer = wn_layer.remove()
-                    wn_removed_output = wn_removed_layer(sample_data)
+@pytest.mark.usefixtures("maybe_run_functions_eagerly")
+@pytest.mark.parametrize("data_init", [True, False])
+@pytest.mark.parametrize(
+    "base_layer_fn, input_shape",
+    [
+        (lambda: tf.keras.layers.Dense(1), [1]),
+        (lambda: tf.keras.layers.SimpleRNN(1), [10, 10]),
+        (lambda: tf.keras.layers.Conv2D(3, 1), [3, 3, 1]),
+        (lambda: tf.keras.layers.LSTM(1), [10, 10]),
+    ],
+)
+def test_removal(base_layer_fn, input_shape, data_init):
+    sample_data = np.ones([1] + input_shape, dtype=np.float32)
 
-                self.evaluate(
-                    tf.compat.v1.initialize_variables(wn_removed_layer.variables)
-                )
-                self.assertAllClose(
-                    self.evaluate(wn_removed_output), self.evaluate(wn_output)
-                )
-                self.assertTrue(isinstance(wn_removed_layer, base_layer.__class__))
+    base_layer = base_layer_fn()
+    wn_layer = wrappers.WeightNormalization(base_layer, data_init)
+    wn_output = wn_layer(sample_data)
+    wn_removed_layer = wn_layer.remove()
+    wn_removed_output = wn_removed_layer(sample_data)
+    np.testing.assert_allclose(wn_removed_output.numpy(), wn_output.numpy())
+    assert isinstance(wn_removed_layer, base_layer.__class__)
 
 
 if __name__ == "__main__":

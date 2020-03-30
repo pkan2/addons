@@ -19,27 +19,48 @@ import pytest
 import numpy as np
 import tensorflow as tf
 
+from tensorflow_addons.layers.normalizations import FilterResponseNormalization
 from tensorflow_addons.layers.normalizations import GroupNormalization
 from tensorflow_addons.layers.normalizations import InstanceNormalization
 from tensorflow_addons.utils import test_utils
 
 
+# ------------Tests to ensure proper inheritance. If these suceed you can
+# test for Instance norm by setting Groupnorm groups = -1
+def test_inheritance():
+    assert issubclass(InstanceNormalization, GroupNormalization)
+    assert InstanceNormalization.build == GroupNormalization.build
+    assert InstanceNormalization.call == GroupNormalization.call
+
+
+def test_groups_after_init():
+    layers = InstanceNormalization()
+    assert layers.groups == -1
+
+
+def test_weights():
+    # Check if weights get initialized correctly
+    layer = GroupNormalization(groups=1, scale=False, center=False)
+    layer.build((None, 3, 4))
+    assert len(layer.trainable_weights) == 0
+    assert len(layer.weights) == 0
+
+    layer = InstanceNormalization()
+    layer.build((None, 3, 4))
+    assert len(layer.trainable_weights) == 2
+    assert len(layer.weights) == 2
+
+
+def test_apply_normalization():
+    input_shape = (1, 4)
+    reshaped_inputs = tf.constant([[[2.0, 2.0], [3.0, 3.0]]])
+    layer = GroupNormalization(groups=2, axis=1, scale=False, center=False)
+    normalized_input = layer._apply_normalization(reshaped_inputs, input_shape)
+    np.testing.assert_equal(normalized_input, np.array([[[0.0, 0.0], [0.0, 0.0]]]))
+
+
 @test_utils.run_all_in_graph_and_eager_modes
 class NormalizationTest(tf.test.TestCase):
-
-    # ------------Tests to ensure proper inheritance. If these suceed you can
-    # test for Instance norm by setting Groupnorm groups = -1
-    def test_inheritance(self):
-        self.assertTrue(issubclass(InstanceNormalization, GroupNormalization))
-        self.assertTrue(InstanceNormalization.build == GroupNormalization.build)
-        self.assertTrue(InstanceNormalization.call == GroupNormalization.call)
-
-    def test_groups_after_init(self):
-        layers = InstanceNormalization()
-        self.assertTrue(layers.groups == -1)
-
-    # ------------------------------------------------------------------------------
-
     def test_reshape(self):
         def run_reshape_test(axis, group, input_shape, expected_shape):
             group_layer = GroupNormalization(groups=group, axis=axis)
@@ -156,32 +177,6 @@ class NormalizationTest(tf.test.TestCase):
         output_batch = np.random.rand(*(10, 1))
         model.fit(x=input_batch, y=output_batch, epochs=1, batch_size=1)
         return model
-
-    def test_weights(self):
-        # Check if weights get initialized correctly
-        layer = GroupNormalization(groups=1, scale=False, center=False)
-        layer.build((None, 3, 4))
-        self.assertEqual(len(layer.trainable_weights), 0)
-        self.assertEqual(len(layer.weights), 0)
-
-        layer = InstanceNormalization()
-        layer.build((None, 3, 4))
-        self.assertEqual(len(layer.trainable_weights), 2)
-        self.assertEqual(len(layer.weights), 2)
-
-    def test_apply_normalization(self):
-        input_shape = (1, 4)
-        reshaped_inputs = tf.constant([[[2.0, 2.0], [3.0, 3.0]]])
-        layer = GroupNormalization(groups=2, axis=1, scale=False, center=False)
-        normalized_input = layer._apply_normalization(reshaped_inputs, input_shape)
-        self.assertTrue(
-            np.all(
-                np.equal(
-                    self.evaluate(normalized_input),
-                    np.array([[[0.0, 0.0], [0.0, 0.0]]]),
-                )
-            )
-        )
 
     def test_axis_error(self):
         with self.assertRaises(ValueError):
@@ -310,25 +305,143 @@ class NormalizationTest(tf.test.TestCase):
             np.std(out, axis=(0, 2, 3), dtype=np.float32), (1.0, 1.0, 1.0), atol=1e-1
         )
 
-    def test_groupnorm_convnet_no_center_no_scale(self):
-        np.random.seed(0x2020)
-        model = tf.keras.models.Sequential()
-        norm = GroupNormalization(
-            axis=-1, groups=2, center=False, scale=False, input_shape=(3, 4, 4)
-        )
-        model.add(norm)
-        model.compile(loss="mse", optimizer="sgd")
-        # centered and variance are  5.0 and 10.0, respectively
-        x = np.random.normal(loc=5.0, scale=10.0, size=(1000, 3, 4, 4))
-        model.fit(x, x, epochs=4, verbose=0)
-        out = model.predict(x)
 
-        self.assertAllClose(
-            np.mean(out, axis=(0, 2, 3), dtype=np.float32), (0.0, 0.0, 0.0), atol=1e-1
-        )
-        self.assertAllClose(
-            np.std(out, axis=(0, 2, 3), dtype=np.float32), (1.0, 1.0, 1.0), atol=1e-1
-        )
+@pytest.mark.usefixtures("maybe_run_functions_eagerly")
+def test_groupnorm_convnet_no_center_no_scale():
+    np.random.seed(0x2020)
+    model = tf.keras.models.Sequential()
+    norm = GroupNormalization(
+        axis=-1, groups=2, center=False, scale=False, input_shape=(3, 4, 4)
+    )
+    model.add(norm)
+    model.compile(loss="mse", optimizer="sgd")
+    # centered and variance are  5.0 and 10.0, respectively
+    x = np.random.normal(loc=5.0, scale=10.0, size=(1000, 3, 4, 4))
+    model.fit(x, x, epochs=4, verbose=0)
+    out = model.predict(x)
+
+    np.testing.assert_allclose(
+        np.mean(out, axis=(0, 2, 3), dtype=np.float32), (0.0, 0.0, 0.0), atol=1e-1
+    )
+    np.testing.assert_allclose(
+        np.std(out, axis=(0, 2, 3), dtype=np.float32), (1.0, 1.0, 1.0), atol=1e-1
+    )
+
+
+def calculate_frn(
+    x, beta=0.2, gamma=1, eps=1e-6, learned_epsilon=False, dtype=np.float32
+):
+    if learned_epsilon:
+        eps = eps + 1e-4
+    eps = tf.cast(eps, dtype=dtype)
+    nu2 = tf.reduce_mean(tf.square(x), axis=[1, 2], keepdims=True)
+    x = x * tf.math.rsqrt(nu2 + tf.abs(eps))
+    return gamma * x + beta
+
+
+def set_random_seed():
+    seed = 0x2020
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
+
+
+@pytest.mark.usefixtures("maybe_run_functions_eagerly")
+@pytest.mark.parametrize("dtype", [np.float16, np.float32, np.float64])
+def test_with_beta(dtype):
+    set_random_seed()
+    inputs = np.random.rand(28, 28, 1).astype(dtype)
+    inputs = np.expand_dims(inputs, axis=0)
+    frn = FilterResponseNormalization(
+        beta_initializer="ones", gamma_initializer="ones", dtype=dtype
+    )
+    frn.build((None, 28, 28, 1))
+    observed = frn(inputs)
+    expected = calculate_frn(inputs, beta=1, gamma=1, dtype=dtype)
+    np.testing.assert_allclose(expected[0], observed[0])
+
+
+@pytest.mark.usefixtures("maybe_run_functions_eagerly")
+@pytest.mark.parametrize("dtype", [np.float16, np.float32, np.float64])
+def test_with_gamma(dtype):
+    set_random_seed()
+    inputs = np.random.rand(28, 28, 1).astype(dtype)
+    inputs = np.expand_dims(inputs, axis=0)
+    frn = FilterResponseNormalization(
+        beta_initializer="zeros", gamma_initializer="ones", dtype=dtype
+    )
+    frn.build((None, 28, 28, 1))
+    observed = frn(inputs)
+    expected = calculate_frn(inputs, beta=0, gamma=1, dtype=dtype)
+    np.testing.assert_allclose(expected[0], observed[0])
+
+
+@pytest.mark.usefixtures("maybe_run_functions_eagerly")
+@pytest.mark.parametrize("dtype", [np.float16, np.float32, np.float64])
+def test_with_epsilon(dtype):
+    set_random_seed()
+    inputs = np.random.rand(28, 28, 1).astype(dtype)
+    inputs = np.expand_dims(inputs, axis=0)
+    frn = FilterResponseNormalization(
+        beta_initializer=tf.keras.initializers.Constant(0.5),
+        gamma_initializer="ones",
+        learned_epsilon=True,
+        dtype=dtype,
+    )
+    frn.build((None, 28, 28, 1))
+    observed = frn(inputs)
+    expected = calculate_frn(
+        inputs, beta=0.5, gamma=1, learned_epsilon=True, dtype=dtype
+    )
+    np.testing.assert_allclose(expected[0], observed[0])
+
+
+@pytest.mark.usefixtures("maybe_run_functions_eagerly")
+@pytest.mark.parametrize("dtype", [np.float16, np.float32, np.float64])
+def test_keras_model(dtype):
+    set_random_seed()
+    frn = FilterResponseNormalization(
+        beta_initializer="ones", gamma_initializer="ones", dtype=dtype
+    )
+    random_inputs = np.random.rand(10, 32, 32, 3).astype(dtype)
+    random_labels = np.random.randint(2, size=(10,)).astype(dtype)
+    input_layer = tf.keras.layers.Input(shape=(32, 32, 3))
+    x = frn(input_layer)
+    x = tf.keras.layers.Flatten()(x)
+    out = tf.keras.layers.Dense(1, activation="sigmoid")(x)
+    model = tf.keras.models.Model(input_layer, out)
+    model.compile(loss="binary_crossentropy", optimizer="sgd")
+    model.fit(random_inputs, random_labels, epochs=2)
+
+
+@pytest.mark.parametrize("dtype", [np.float16, np.float32, np.float64])
+def test_serialization(dtype):
+    frn = FilterResponseNormalization(
+        beta_initializer="ones", gamma_initializer="ones", dtype=dtype
+    )
+    serialized_frn = tf.keras.layers.serialize(frn)
+    new_layer = tf.keras.layers.deserialize(serialized_frn)
+    assert frn.get_config() == new_layer.get_config()
+
+
+@pytest.mark.usefixtures("maybe_run_functions_eagerly")
+@pytest.mark.parametrize("dtype", [np.float16, np.float32, np.float64])
+def test_eps_gards(dtype):
+    set_random_seed()
+    random_inputs = np.random.rand(10, 32, 32, 3).astype(np.float32)
+    random_labels = np.random.randint(2, size=(10,)).astype(np.float32)
+    input_layer = tf.keras.layers.Input(shape=(32, 32, 3))
+    frn = FilterResponseNormalization(
+        beta_initializer="ones", gamma_initializer="ones", learned_epsilon=True
+    )
+    initial_eps_value = frn.eps_learned.numpy()[0]
+    x = frn(input_layer)
+    x = tf.keras.layers.Flatten()(x)
+    out = tf.keras.layers.Dense(1, activation="sigmoid")(x)
+    model = tf.keras.models.Model(input_layer, out)
+    model.compile(loss="binary_crossentropy", optimizer="sgd")
+    model.fit(random_inputs, random_labels, epochs=1)
+    final_eps_value = frn.eps_learned.numpy()[0]
+    assert initial_eps_value != final_eps_value
 
 
 if __name__ == "__main__":

@@ -49,6 +49,38 @@ def _np_sparsemax(z):
     return np.maximum(0, z - tau_z)
 
 
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_sparsemax_against_numpy_axis(dtype):
+    """check sparsemax kernel against numpy."""
+    random = np.random.RandomState(1)
+
+    z = random.uniform(low=-3, high=3, size=(test_obs, 10))
+
+    tf_sparsemax_out = sparsemax(z.astype(dtype), axis=0).numpy()
+    np_sparsemax = np.transpose(_np_sparsemax(np.transpose(z))).astype(dtype)
+
+    test_utils.assert_allclose_according_to_type(
+        np_sparsemax, tf_sparsemax_out, half_atol=5e-3
+    )
+    assert np_sparsemax.shape == tf_sparsemax_out.shape
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_sparsemax_against_numpy_low_rank(dtype):
+    """check sparsemax kernel against numpy."""
+    random = np.random.RandomState(1)
+
+    z = random.uniform(low=-3, high=3, size=(10))
+
+    tf_sparsemax_out = sparsemax(z.astype(dtype)).numpy()
+    np_sparsemax = np.reshape(_np_sparsemax(np.reshape(z, [1, 10])), [10]).astype(dtype)
+
+    test_utils.assert_allclose_according_to_type(
+        np_sparsemax, tf_sparsemax_out, half_atol=5e-3
+    )
+    assert np_sparsemax.shape == tf_sparsemax_out.shape
+
+
 @test_utils.run_all_with_types(["float32", "float64"])
 @test_utils.run_all_in_graph_and_eager_modes
 class SparsemaxTest(tf.test.TestCase):
@@ -66,32 +98,6 @@ class SparsemaxTest(tf.test.TestCase):
 
         tf_sparsemax_op, tf_sparsemax_out = self._tf_sparsemax(z, dtype)
         np_sparsemax = _np_sparsemax(z).astype(dtype)
-
-        self.assertAllCloseAccordingToType(np_sparsemax, tf_sparsemax_out)
-        self.assertShapeEqual(np_sparsemax, tf_sparsemax_op)
-
-    def test_sparsemax_against_numpy_axis(self, dtype=None):
-        """check sparsemax kernel against numpy."""
-        random = np.random.RandomState(1)
-
-        z = random.uniform(low=-3, high=3, size=(test_obs, 10))
-
-        tf_sparsemax_op, tf_sparsemax_out = self._tf_sparsemax(z, dtype, axis=0)
-        np_sparsemax = np.transpose(_np_sparsemax(np.transpose(z))).astype(dtype)
-
-        self.assertAllCloseAccordingToType(np_sparsemax, tf_sparsemax_out)
-        self.assertShapeEqual(np_sparsemax, tf_sparsemax_op)
-
-    def test_sparsemax_against_numpy_low_rank(self, dtype=None):
-        """check sparsemax kernel against numpy."""
-        random = np.random.RandomState(1)
-
-        z = random.uniform(low=-3, high=3, size=(10))
-
-        tf_sparsemax_op, tf_sparsemax_out = self._tf_sparsemax(z, dtype)
-        np_sparsemax = np.reshape(_np_sparsemax(np.reshape(z, [1, 10])), [10]).astype(
-            dtype
-        )
 
         self.assertAllCloseAccordingToType(np_sparsemax, tf_sparsemax_out)
         self.assertShapeEqual(np_sparsemax, tf_sparsemax_op)
@@ -210,48 +216,6 @@ class SparsemaxTest(tf.test.TestCase):
             tf_sparsemax_zpc, tf_sparsemax_z, half_atol=5e-3
         )
 
-    def test_permutation(self, dtype=None):
-        """check sparsemax proposition 3."""
-        random = np.random.RandomState(6)
-
-        z = random.uniform(low=-3, high=3, size=(test_obs, 10))
-        _, p = self._tf_sparsemax(z, dtype)
-
-        for i in range(test_obs):
-            per = random.permutation(10)
-
-            tf_sparsemax_op, tf_sparsemax_out = self._tf_sparsemax(
-                z[i, per].reshape(1, -1), dtype
-            )
-            p_expected = p[i, per].reshape(1, -1)
-
-            self.assertAllCloseAccordingToType(
-                p_expected, tf_sparsemax_out, half_atol=5e-3
-            )
-            self.assertShapeEqual(p_expected, tf_sparsemax_op)
-
-    def test_diffrence(self, dtype=None):
-        """check sparsemax proposition 4."""
-        random = np.random.RandomState(7)
-
-        z = random.uniform(low=-3, high=3, size=(test_obs, 10))
-        _, p = self._tf_sparsemax(z, dtype)
-
-        etol = {"float16": 1e-2, "float32": 1e-6, "float64": 1e-9}[dtype]
-
-        for val in range(0, test_obs):
-            for i in range(0, 10):
-                for j in range(0, 10):
-                    # check condition, the obesite pair will be checked anyway
-                    if z[val, i] > z[val, j]:
-                        continue
-
-                    self.assertTrue(
-                        0 <= p[val, j] - p[val, i] <= z[val, j] - z[val, i] + etol,
-                        "0 <= %.10f <= %.10f"
-                        % (p[val, j] - p[val, i], z[val, j] - z[val, i] + etol),
-                    )
-
 
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 def test_two_dimentional(dtype):
@@ -268,6 +232,46 @@ def test_two_dimentional(dtype):
         1 - p0_expected, tf_sparsemax_out[:, 1]
     )
     assert z.shape == tf_sparsemax_out.shape
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_diffrence(dtype):
+    """check sparsemax proposition 4."""
+    random = np.random.RandomState(7)
+
+    z = random.uniform(low=-3, high=3, size=(test_obs, 10))
+    p = sparsemax(z.astype(dtype)).numpy()
+
+    etol = {np.float32: 1e-6, np.float64: 1e-9}[dtype]
+
+    for val in range(0, test_obs):
+        for i in range(0, 10):
+            for j in range(0, 10):
+                # check condition, the obesite pair will be checked anyway
+                if z[val, i] > z[val, j]:
+                    continue
+
+                assert 0 <= p[val, j] - p[val, i] <= z[val, j] - z[val, i] + etol
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_permutation(dtype):
+    """check sparsemax proposition 3."""
+    random = np.random.RandomState(6)
+
+    z = random.uniform(low=-3, high=3, size=(test_obs, 10))
+    p = sparsemax(z.astype(dtype)).numpy()
+
+    for i in range(test_obs):
+        per = random.permutation(10)
+
+        tf_sparsemax_out = sparsemax(z[i, per].reshape(1, -1).astype(dtype))
+        p_expected = p[i, per].reshape(1, -1)
+
+        test_utils.assert_allclose_according_to_type(
+            p_expected, tf_sparsemax_out, half_atol=5e-3
+        )
+        assert p_expected.shape == tf_sparsemax_out.shape
 
 
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
